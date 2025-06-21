@@ -31,7 +31,7 @@ type MerkleProofData struct {
 	HashNum           uint64 // Number of hashes that follow
 	Hashes            [][32]byte
 	VBitsNum          uint64 // Number of bytes in vBits (flags)
-	VBits             []byte // Flag bits, packed field
+	VBits             []bool // Flag, unpacked field
 }
 
 // reverseBytes reverses a byte slice. Useful for displaying Bitcoin hashes
@@ -51,9 +51,9 @@ func doubleSha256(data []byte) [32]byte {
 	return hash2
 }
 
-// ReadVarInt reads a Bitcoin-style variable-length integer (CompactSize).
+// readVarInt reads a Bitcoin-style variable-length integer (CompactSize).
 // Reference: https://developer.bitcoin.org/reference/transactions.html#compactsize-unsigned-integers
-func ReadVarInt(r io.Reader) (uint64, error) {
+func readVarInt(r io.Reader) (uint64, error) {
 	var discriminant uint8
 	err := binary.Read(r, binary.LittleEndian, &discriminant)
 	if err != nil {
@@ -129,7 +129,7 @@ func decodeTxOutProofData(decodedBytes []byte, blockHeader *BlockHeader, proofDa
 	}
 
 	// Read HashNum (hash_count)
-	proofData.HashNum, err = ReadVarInt(merkleReader)
+	proofData.HashNum, err = readVarInt(merkleReader)
 	if err != nil {
 		return fmt.Errorf("reading HashNum (hash_count) from Merkle proof data: %w", err)
 	}
@@ -143,19 +143,30 @@ func decodeTxOutProofData(decodedBytes []byte, blockHeader *BlockHeader, proofDa
 	}
 
 	// Read VBitsNum (flag_count)
-	proofData.VBitsNum, err = ReadVarInt(merkleReader)
+	proofData.VBitsNum, err = readVarInt(merkleReader)
 	if err != nil {
 		return fmt.Errorf("eading VBitsNum (flag_count) from Merkle proof data: %w", err)
 	}
 
 	// Read VBits (flags)
+	var vBits []byte
 	if proofData.VBitsNum > 0 {
-		proofData.VBits = make([]byte, proofData.VBitsNum)
-		if _, err = io.ReadFull(merkleReader, proofData.VBits); err != nil {
+		vBits = make([]byte, proofData.VBitsNum)
+		if _, err = io.ReadFull(merkleReader, vBits); err != nil {
 			return fmt.Errorf("reading VBits (flags) from Merkle proof data: %w", err)
 		}
+
+		for _, b := range vBits {
+			// Iterate through each bit in the byte, from LSB (0) to MSB (7)
+			for i := 0; i < 8; i++ {
+				// Check if the i-th bit is set (1)
+				isSet := (b>>uint(i))&1 == 1
+				proofData.VBits = append(proofData.VBits, isSet)
+			}
+		}
 	} else {
-		proofData.VBits = []byte{} // Ensure it's an empty slice, not nil
+		vBits = []byte{}
+		proofData.VBits = []bool{} // Ensure it's an empty slice, not nil
 	}
 
 	// 10. Print the decoded Merkle proof data
@@ -167,59 +178,9 @@ func decodeTxOutProofData(decodedBytes []byte, blockHeader *BlockHeader, proofDa
 		fmt.Printf("//    %d: %s\n", i+1, hex.EncodeToString(reverseBytes(hash[:])))
 	}
 	fmt.Printf("//  Flag Bytes Count (vbits_num): %d\n", proofData.VBitsNum)
-	fmt.Printf("//  Flag Bits (vBits): %s\n", hex.EncodeToString(proofData.VBits))
+	fmt.Printf("//  Flag Bits (vBits): %s\n", hex.EncodeToString(vBits))
 
 	return nil
-}
-
-func main() {
-	// 1. コマンドライン引数の数をチェック
-	if len(os.Args) != 2 {
-		fmt.Fprintf(os.Stderr, "Error: Please provide exactly one hexadecimal string argument.\n")
-		fmt.Fprintf(os.Stderr, "Usage: %s <hex_string>\n", os.Args[0])
-		os.Exit(1)
-	}
-
-	// 2. 第一引数を取得
-	hexInput := os.Args[1]
-
-	// 3. 16進数文字列を []uint8 に変換
-	//    DecodeStringは、入力文字列の長さが奇数の場合や、
-	//    16進数として不正な文字が含まれている場合にエラーを返します。
-	decodedBytes, err := hex.DecodeString(hexInput)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to convert hexadecimal string: %v\n", err)
-		os.Exit(1)
-	}
-
-	var blockHeader BlockHeader
-	var proofData MerkleProofData
-
-	err = decodeTxOutProofData(decodedBytes, &blockHeader, &proofData)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to decode transaction output proof data: %v\n", err)
-		os.Exit(1)
-	}
-
-	// 11. Extract individual bits from vBits into a bool slice
-	var vbits []bool
-	// Iterate through each byte in the vBits slice
-	for _, b := range proofData.VBits {
-		// Iterate through each bit in the byte, from LSB (0) to MSB (7)
-		for i := 0; i < 8; i++ {
-			// Check if the i-th bit is set (1)
-			isSet := (b>>uint(i))&1 == 1
-			vbits = append(vbits, isSet)
-		}
-	}
-
-	// 13. Build Merkle Tree and generate Graphviz DOT output
-	dotString, err := buildMerkleTreeDot(proofData.TotalTransactions, vbits, proofData.Hashes)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error building Merkle tree: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println(dotString)
 }
 
 // buildMerkleTreeDot constructs the Merkle tree and returns its Graphviz DOT representation.
@@ -333,4 +294,42 @@ func buildAndDrawPartialTree(graph *gographviz.Graph, height int, pos int, vbits
 		graph.AddEdge(nodeID, rightChildID, true, rightEdgeAttrs)
 	}
 	return parentHash, nodeID, nil
+}
+
+func main() {
+	// 1. コマンドライン引数の数をチェック
+	if len(os.Args) != 2 {
+		fmt.Fprintf(os.Stderr, "Error: Please provide exactly one hexadecimal string argument.\n")
+		fmt.Fprintf(os.Stderr, "Usage: %s <hex_string>\n", os.Args[0])
+		os.Exit(1)
+	}
+
+	// 2. 第一引数を取得
+	hexInput := os.Args[1]
+
+	// 3. 16進数文字列を []uint8 に変換
+	//    DecodeStringは、入力文字列の長さが奇数の場合や、
+	//    16進数として不正な文字が含まれている場合にエラーを返します。
+	decodedBytes, err := hex.DecodeString(hexInput)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to convert hexadecimal string: %v\n", err)
+		os.Exit(1)
+	}
+
+	var blockHeader BlockHeader
+	var proofData MerkleProofData
+
+	err = decodeTxOutProofData(decodedBytes, &blockHeader, &proofData)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to decode transaction output proof data: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 13. Build Merkle Tree and generate Graphviz DOT output
+	dotString, err := buildMerkleTreeDot(proofData.TotalTransactions, proofData.VBits, proofData.Hashes)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error building Merkle tree: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(dotString)
 }
