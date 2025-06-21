@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"time"
+
+	"github.com/awalterschulze/gographviz"
 )
 
 // BlockHeader defines the structure of a Bitcoin block header.
@@ -20,6 +24,16 @@ type BlockHeader struct {
 	Nonce         uint32
 }
 
+// MerkleProofData defines the structure for the data following the block header,
+// resembling parts of a MerkleBlock message (BIP 37).
+type MerkleProofData struct {
+	TotalTransactions uint32
+	HashNum           uint64 // Number of hashes that follow
+	Hashes            [][32]byte
+	VBitsNum          uint64 // Number of bytes in vBits (flags)
+	VBits             []byte // Flag bits, packed field
+}
+
 // reverseBytes reverses a byte slice. Useful for displaying Bitcoin hashes
 // in the commonly seen big-endian format, as they are often stored little-endian.
 func reverseBytes(data []byte) []byte {
@@ -28,6 +42,49 @@ func reverseBytes(data []byte) []byte {
 		reversed[i] = data[len(data)-1-i]
 	}
 	return reversed
+}
+
+// doubleSha256 computes SHA256(SHA256(data))
+func doubleSha256(data []byte) [32]byte {
+	hash1 := sha256.Sum256(data)
+	hash2 := sha256.Sum256(hash1[:])
+	return hash2
+}
+
+// ReadVarInt reads a Bitcoin-style variable-length integer (CompactSize).
+// Reference: https://developer.bitcoin.org/reference/transactions.html#compactsize-unsigned-integers
+func ReadVarInt(r io.Reader) (uint64, error) {
+	var discriminant uint8
+	err := binary.Read(r, binary.LittleEndian, &discriminant)
+	if err != nil {
+		return 0, err // Handles io.EOF if reader is empty or read fails
+	}
+
+	switch discriminant {
+	case 0xfd:
+		var val uint16
+		err = binary.Read(r, binary.LittleEndian, &val)
+		if err != nil {
+			return 0, err
+		}
+		return uint64(val), nil
+	case 0xfe:
+		var val uint32
+		err = binary.Read(r, binary.LittleEndian, &val)
+		if err != nil {
+			return 0, err
+		}
+		return uint64(val), nil
+	case 0xff:
+		var val uint64
+		err = binary.Read(r, binary.LittleEndian, &val)
+		if err != nil {
+			return 0, err
+		}
+		return val, nil
+	default:
+		return uint64(discriminant), nil
+	}
 }
 
 func main() {
@@ -53,8 +110,8 @@ func main() {
 	// 4. 変換できた []uint8 を再度16進数文字列に変換して標準出力
 	//    This step confirms the input was correctly processed.
 	//    The original hexInput and hexOutput should be the same (ignoring case differences).
-	hexOutput := hex.EncodeToString(decodedBytes)
-	fmt.Println("Re-encoded full hex string:", hexOutput)
+	// hexOutput := hex.EncodeToString(decodedBytes)
+	// fmt.Println("Re-encoded full hex string:", hexOutput)
 
 	// 5. Check if decodedBytes has enough data for a block header (80 bytes)
 	if len(decodedBytes) < 80 {
@@ -75,12 +132,184 @@ func main() {
 	}
 
 	// 8. Print the decoded block header
-	fmt.Println("\nDecoded Block Header (first 80 bytes):")
-	fmt.Printf("  Version:         %d (0x%x)\n", blockHeader.Version, blockHeader.Version)
+	fmt.Printf("//Decoded Block Header (first 80 bytes):n")
+	fmt.Printf("//  Version:         %d (0x%x)\n", blockHeader.Version, blockHeader.Version)
 	// PrevBlockHash and MerkleRoot are typically displayed with bytes reversed from their in-memory representation.
-	fmt.Printf("  Prev Block Hash: %s\n", hex.EncodeToString(reverseBytes(blockHeader.PrevBlockHash[:])))
-	fmt.Printf("  Merkle Root:     %s\n", hex.EncodeToString(reverseBytes(blockHeader.MerkleRoot[:])))
-	fmt.Printf("  Timestamp:       %d (%s UTC)\n", blockHeader.Timestamp, time.Unix(int64(blockHeader.Timestamp), 0).UTC().Format(time.RFC3339))
-	fmt.Printf("  Bits (Target):   %d (0x%x)\n", blockHeader.Bits, blockHeader.Bits)
-	fmt.Printf("  Nonce:           %d (0x%x)\n", blockHeader.Nonce, blockHeader.Nonce)
+	fmt.Printf("//  Prev Block Hash: %s\n", hex.EncodeToString(reverseBytes(blockHeader.PrevBlockHash[:])))
+	fmt.Printf("//  Merkle Root:     %s\n", hex.EncodeToString(reverseBytes(blockHeader.MerkleRoot[:])))
+	fmt.Printf("//  Timestamp:       %d (%s UTC)\n", blockHeader.Timestamp, time.Unix(int64(blockHeader.Timestamp), 0).UTC().Format(time.RFC3339))
+	fmt.Printf("//  Bits (Target):   %d (0x%x)\n", blockHeader.Bits, blockHeader.Bits)
+	fmt.Printf("//  Nonce:           %d (0x%x)\n", blockHeader.Nonce, blockHeader.Nonce)
+
+	// 9. Process data after the block header (Merkle proof like data)
+	remainingBytes := decodedBytes[80:]
+	if len(remainingBytes) == 0 {
+		fmt.Println("\nNo additional data found after block header.")
+		return
+	}
+
+	merkleReader := bytes.NewReader(remainingBytes)
+	var proofData MerkleProofData
+	var errProof error
+
+	// Read TotalTransactions
+	if errProof = binary.Read(merkleReader, binary.LittleEndian, &proofData.TotalTransactions); errProof != nil {
+		fmt.Fprintf(os.Stderr, "\nError reading TotalTransactions from Merkle proof data: %v\n", errProof)
+		fmt.Fprintln(os.Stderr, "Further Merkle proof data parsing aborted.")
+		return
+	}
+
+	// Read HashNum (hash_count)
+	proofData.HashNum, errProof = ReadVarInt(merkleReader)
+	if errProof != nil {
+		fmt.Fprintf(os.Stderr, "\nError reading HashNum (hash_count) from Merkle proof data: %v\n", errProof)
+		fmt.Fprintln(os.Stderr, "Further Merkle proof data parsing aborted.")
+		return
+	}
+
+	// Read Hashes
+	proofData.Hashes = make([][32]byte, proofData.HashNum)
+	for i := uint64(0); i < proofData.HashNum; i++ {
+		if _, errProof = io.ReadFull(merkleReader, proofData.Hashes[i][:]); errProof != nil {
+			fmt.Fprintf(os.Stderr, "\nError reading hash #%d from Merkle proof data: %v\n", i+1, errProof)
+			fmt.Fprintln(os.Stderr, "Further Merkle proof data parsing aborted.")
+			return
+		}
+	}
+
+	// Read VBitsNum (flag_count)
+	proofData.VBitsNum, errProof = ReadVarInt(merkleReader)
+	if errProof != nil {
+		fmt.Fprintf(os.Stderr, "\nError reading VBitsNum (flag_count) from Merkle proof data: %v\n", errProof)
+		fmt.Fprintln(os.Stderr, "Further Merkle proof data parsing aborted.")
+		return
+	}
+
+	// Read VBits (flags)
+	if proofData.VBitsNum > 0 {
+		proofData.VBits = make([]byte, proofData.VBitsNum)
+		if _, errProof = io.ReadFull(merkleReader, proofData.VBits); errProof != nil {
+			fmt.Fprintf(os.Stderr, "\nError reading VBits (flags) from Merkle proof data: %v\n", errProof)
+			fmt.Fprintln(os.Stderr, "Further Merkle proof data parsing aborted.")
+			return
+		}
+	} else {
+		proofData.VBits = []byte{} // Ensure it's an empty slice, not nil
+	}
+
+	// 10. Print the decoded Merkle proof data
+	fmt.Printf("//Decoded Merkle Proof Data (following header):\n")
+	fmt.Printf("//  Total Transactions: %d\n", proofData.TotalTransactions)
+	fmt.Printf("//  Hash Count (hash_num): %d\n", proofData.HashNum)
+	fmt.Printf("//  Hashes:\n")
+	for i, hash := range proofData.Hashes {
+		fmt.Printf("//    %d: %s\n", i+1, hex.EncodeToString(reverseBytes(hash[:])))
+	}
+	fmt.Printf("//  Flag Bytes Count (vbits_num): %d\n", proofData.VBitsNum)
+	fmt.Printf("//  Flag Bits (vBits): %s\n", hex.EncodeToString(proofData.VBits))
+
+	// 11. Extract individual bits from vBits into a bool slice
+	var vbits []bool
+	// Iterate through each byte in the vBits slice
+	for _, b := range proofData.VBits {
+		// Iterate through each bit in the byte, from LSB (0) to MSB (7)
+		for i := 0; i < 8; i++ {
+			// Check if the i-th bit is set (1)
+			isSet := (b>>uint(i))&1 == 1
+			vbits = append(vbits, isSet)
+		}
+	}
+
+	// 13. Build Merkle Tree and generate Graphviz DOT output
+	dotString, err := buildMerkleTreeDot(proofData.TotalTransactions, vbits, proofData.Hashes)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error building Merkle tree: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(dotString)
+}
+
+// buildMerkleTreeDot constructs the Merkle tree and returns its Graphviz DOT representation.
+func buildMerkleTreeDot(totalTx uint32, vbits []bool, hashes [][32]byte) (string, error) {
+	vbitsIndex := 0
+	hashesIndex := 0
+
+	graph := gographviz.NewGraph()
+	if err := graph.SetName("G"); err != nil {
+		return "", err
+	}
+	if err := graph.SetDir(true); err != nil { // Directed graph
+		return "", err
+	}
+
+	// Calculate the total height of the tree
+	height := 0
+	for (1 << uint(height)) < int(totalTx) {
+		height++
+	}
+
+	_, _, err := buildAndDrawPartialTree(graph, height, 0, &vbitsIndex, &hashesIndex, vbits, hashes)
+	if err != nil {
+		return "", err
+	}
+
+	return graph.String(), nil
+}
+
+// buildAndDrawPartialTree is a recursive function to build the partial merkle tree and add nodes/edges to the graph.
+// It returns the hash of the current node and its ID.
+func buildAndDrawPartialTree(graph *gographviz.Graph, height int, pos int, vbitsIndex *int, hashesIndex *int, vbits []bool, hashes [][32]byte) ([32]byte, string, error) {
+	if *vbitsIndex >= len(vbits) {
+		return [32]byte{}, "", fmt.Errorf("ran out of flags, vbits is too short")
+	}
+	flag := vbits[*vbitsIndex]
+	*vbitsIndex++
+
+	nodeID := fmt.Sprintf("node_%d_%d", height, pos)
+
+	if !flag || height == 0 { // A leaf node or a branch that represents a leaf
+		if *hashesIndex >= len(hashes) {
+			return [32]byte{}, "", fmt.Errorf("ran out of hashes, proof is malformed")
+		}
+		hash := hashes[*hashesIndex]
+		*hashesIndex++
+
+		fillColor := "lightgray"
+		if flag {
+			fillColor = "lightcoral" // Non-flagged nodes are colored differently
+		}
+		attrs := map[string]string{
+			"label":     fmt.Sprintf("\"%.8s...\"", hex.EncodeToString(reverseBytes(hash[:]))),
+			"shape":     "box", // Leaf nodes are boxes
+			"style":     "filled",
+			"fillcolor": fillColor,
+		}
+		graph.AddNode("G", nodeID, attrs)
+		return hash, nodeID, nil
+	}
+
+	// This is an internal node, recurse for children
+	leftHash, leftChildID, err := buildAndDrawPartialTree(graph, height-1, pos*2, vbitsIndex, hashesIndex, vbits, hashes)
+	if err != nil {
+		return [32]byte{}, "", err
+	}
+	rightHash, rightChildID, err := buildAndDrawPartialTree(graph, height-1, pos*2+1, vbitsIndex, hashesIndex, vbits, hashes)
+	if err != nil {
+		return [32]byte{}, "", err
+	}
+
+	// Calculate parent hash
+	combined := append(leftHash[:], rightHash[:]...)
+	parentHash := doubleSha256(combined)
+
+	attrs := map[string]string{
+		"label": fmt.Sprintf("\"%.8s...\"", hex.EncodeToString(reverseBytes(parentHash[:]))),
+		"shape": "ellipse", // Internal nodes are ellipses
+	}
+
+	graph.AddNode("G", nodeID, attrs)
+	graph.AddEdge(nodeID, leftChildID, true, nil)
+	graph.AddEdge(nodeID, rightChildID, true, nil)
+
+	return parentHash, nodeID, nil
 }
