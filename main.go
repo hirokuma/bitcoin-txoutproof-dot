@@ -132,7 +132,7 @@ func main() {
 	}
 
 	// 8. Print the decoded block header
-	fmt.Printf("//Decoded Block Header (first 80 bytes):n")
+	fmt.Printf("//Decoded Block Header (first 80 bytes):\n")
 	fmt.Printf("//  Version:         %d (0x%x)\n", blockHeader.Version, blockHeader.Version)
 	// PrevBlockHash and MerkleRoot are typically displayed with bytes reversed from their in-memory representation.
 	fmt.Printf("//  Prev Block Hash: %s\n", hex.EncodeToString(reverseBytes(blockHeader.PrevBlockHash[:])))
@@ -248,7 +248,7 @@ func buildMerkleTreeDot(totalTx uint32, vbits []bool, hashes [][32]byte) (string
 		height++
 	}
 
-	_, _, err := buildAndDrawPartialTree(graph, height, 0, &vbitsIndex, &hashesIndex, vbits, hashes, totalTx)
+	_, _, err := buildAndDrawPartialTree(graph, height, 0, &vbitsIndex, &hashesIndex, vbits, hashes, totalTx, height)
 	if err != nil {
 		return "", err
 	}
@@ -258,7 +258,7 @@ func buildMerkleTreeDot(totalTx uint32, vbits []bool, hashes [][32]byte) (string
 
 // buildAndDrawPartialTree is a recursive function to build the partial merkle tree and add nodes/edges to the graph.
 // It returns the hash of the current node and its ID.
-func buildAndDrawPartialTree(graph *gographviz.Graph, height int, pos int, vbitsIndex *int, hashesIndex *int, vbits []bool, hashes [][32]byte, totalTx uint32) ([32]byte, string, error) {
+func buildAndDrawPartialTree(graph *gographviz.Graph, height int, pos int, vbitsIndex *int, hashesIndex *int, vbits []bool, hashes [][32]byte, totalTx uint32, initialHeight int) ([32]byte, string, error) {
 	if *vbitsIndex >= len(vbits) {
 		return [32]byte{}, "", fmt.Errorf("ran out of flags, vbits is too short")
 	}
@@ -289,7 +289,7 @@ func buildAndDrawPartialTree(graph *gographviz.Graph, height int, pos int, vbits
 	}
 
 	// This is an internal node, recurse for children.
-	leftHash, leftChildID, err := buildAndDrawPartialTree(graph, height-1, pos*2, vbitsIndex, hashesIndex, vbits, hashes, totalTx)
+	leftHash, leftChildID, err := buildAndDrawPartialTree(graph, height-1, pos*2, vbitsIndex, hashesIndex, vbits, hashes, totalTx, initialHeight)
 	if err != nil {
 		return [32]byte{}, "", err
 	}
@@ -301,7 +301,7 @@ func buildAndDrawPartialTree(graph *gographviz.Graph, height int, pos int, vbits
 	// This handles cases where the number of nodes at a level is odd.
 	nodesInLevel := (int(totalTx) + (1 << uint(height-1)) - 1) >> uint(height-1)
 	if pos*2+1 < nodesInLevel {
-		rightHash, rightChildID, err = buildAndDrawPartialTree(graph, height-1, pos*2+1, vbitsIndex, hashesIndex, vbits, hashes, totalTx)
+		rightHash, rightChildID, err = buildAndDrawPartialTree(graph, height-1, pos*2+1, vbitsIndex, hashesIndex, vbits, hashes, totalTx, initialHeight)
 		if err != nil {
 			return [32]byte{}, "", err
 		}
@@ -314,8 +314,16 @@ func buildAndDrawPartialTree(graph *gographviz.Graph, height int, pos int, vbits
 	combined := append(leftHash[:], rightHash[:]...)
 	parentHash := doubleSha256(combined)
 
+	var label string
+	if height == initialHeight {
+		// This is the root node, use the full hash for its label.
+		label = fmt.Sprintf("\"%s\"", hex.EncodeToString(reverseBytes(parentHash[:])))
+	} else {
+		// Other internal nodes, use a truncated hash.
+		label = fmt.Sprintf("\"%.8s...\"", hex.EncodeToString(reverseBytes(parentHash[:])))
+	}
 	attrs := map[string]string{
-		"label": fmt.Sprintf("\"%.8s...\"", hex.EncodeToString(reverseBytes(parentHash[:]))),
+		"label": label,
 		"shape": "ellipse", // Internal nodes are ellipses
 	}
 
