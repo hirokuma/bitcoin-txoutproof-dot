@@ -248,7 +248,7 @@ func buildMerkleTreeDot(totalTx uint32, vbits []bool, hashes [][32]byte) (string
 		height++
 	}
 
-	_, _, err := buildAndDrawPartialTree(graph, height, 0, &vbitsIndex, &hashesIndex, vbits, hashes)
+	_, _, err := buildAndDrawPartialTree(graph, height, 0, &vbitsIndex, &hashesIndex, vbits, hashes, totalTx)
 	if err != nil {
 		return "", err
 	}
@@ -258,7 +258,7 @@ func buildMerkleTreeDot(totalTx uint32, vbits []bool, hashes [][32]byte) (string
 
 // buildAndDrawPartialTree is a recursive function to build the partial merkle tree and add nodes/edges to the graph.
 // It returns the hash of the current node and its ID.
-func buildAndDrawPartialTree(graph *gographviz.Graph, height int, pos int, vbitsIndex *int, hashesIndex *int, vbits []bool, hashes [][32]byte) ([32]byte, string, error) {
+func buildAndDrawPartialTree(graph *gographviz.Graph, height int, pos int, vbitsIndex *int, hashesIndex *int, vbits []bool, hashes [][32]byte, totalTx uint32) ([32]byte, string, error) {
 	if *vbitsIndex >= len(vbits) {
 		return [32]byte{}, "", fmt.Errorf("ran out of flags, vbits is too short")
 	}
@@ -267,16 +267,16 @@ func buildAndDrawPartialTree(graph *gographviz.Graph, height int, pos int, vbits
 
 	nodeID := fmt.Sprintf("node_%d_%d", height, pos)
 
-	if !flag || height == 0 { // A leaf node or a branch that represents a leaf
+	if !flag || height == 0 { // This is a leaf node.
 		if *hashesIndex >= len(hashes) {
 			return [32]byte{}, "", fmt.Errorf("ran out of hashes, proof is malformed")
 		}
 		hash := hashes[*hashesIndex]
 		*hashesIndex++
 
-		fillColor := "lightgray"
+		fillColor := "lightblue" // プルーンされたブランチのデフォルト色
 		if flag {
-			fillColor = "lightcoral" // Non-flagged nodes are colored differently
+			fillColor = "lightcoral" // フィルタにマッチしたトランザクション（葉）の色
 		}
 		attrs := map[string]string{
 			"label":     fmt.Sprintf("\"%.8s...\"", hex.EncodeToString(reverseBytes(hash[:]))),
@@ -288,14 +288,26 @@ func buildAndDrawPartialTree(graph *gographviz.Graph, height int, pos int, vbits
 		return hash, nodeID, nil
 	}
 
-	// This is an internal node, recurse for children
-	leftHash, leftChildID, err := buildAndDrawPartialTree(graph, height-1, pos*2, vbitsIndex, hashesIndex, vbits, hashes)
+	// This is an internal node, recurse for children.
+	leftHash, leftChildID, err := buildAndDrawPartialTree(graph, height-1, pos*2, vbitsIndex, hashesIndex, vbits, hashes, totalTx)
 	if err != nil {
 		return [32]byte{}, "", err
 	}
-	rightHash, rightChildID, err := buildAndDrawPartialTree(graph, height-1, pos*2+1, vbitsIndex, hashesIndex, vbits, hashes)
-	if err != nil {
-		return [32]byte{}, "", err
+
+	var rightHash [32]byte
+	var rightChildID string
+
+	// Check if a right-hand node exists at this height.
+	// This handles cases where the number of nodes at a level is odd.
+	nodesInLevel := (int(totalTx) + (1 << uint(height-1)) - 1) >> uint(height-1)
+	if pos*2+1 < nodesInLevel {
+		rightHash, rightChildID, err = buildAndDrawPartialTree(graph, height-1, pos*2+1, vbitsIndex, hashesIndex, vbits, hashes, totalTx)
+		if err != nil {
+			return [32]byte{}, "", err
+		}
+	} else {
+		// If no right node, the parent hash is created by duplicating the left hash.
+		rightHash = leftHash
 	}
 
 	// Calculate parent hash
@@ -308,8 +320,16 @@ func buildAndDrawPartialTree(graph *gographviz.Graph, height int, pos int, vbits
 	}
 
 	graph.AddNode("G", nodeID, attrs)
-	graph.AddEdge(nodeID, leftChildID, true, nil)
-	graph.AddEdge(nodeID, rightChildID, true, nil)
 
+	// tailport属性を使い、エッジの出る位置を指定して左右のレイアウトを強制する
+	leftEdgeAttrs := map[string]string{"tailport": "sw"}
+	graph.AddEdge(nodeID, leftChildID, true, leftEdgeAttrs)
+
+	// Only add edge if the right child was actually constructed from the proof.
+	// If it was a duplicate, we don't draw an edge to avoid confusion.
+	if rightChildID != "" {
+		rightEdgeAttrs := map[string]string{"tailport": "se"}
+		graph.AddEdge(nodeID, rightChildID, true, rightEdgeAttrs)
+	}
 	return parentHash, nodeID, nil
 }
