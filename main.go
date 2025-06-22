@@ -190,13 +190,13 @@ func decodeTxOutProofData(decodedBytes []byte, blockHeader *BlockHeader, proofDa
 }
 
 // buildMerkleTreeDot constructs the Merkle tree and returns its Graphviz DOT representation.
-func buildMerkleTreeDot(totalTx uint32, vbits []bool, hashes [][32]byte) (string, error) {
+func buildMerkleTreeDot(totalTx uint32, vbits []bool, hashes [][32]byte) (string, [32]byte, error) {
 	graph := gographviz.NewGraph()
 	if err := graph.SetName("G"); err != nil {
-		return "", err
+		return "", [32]byte{}, err
 	}
 	if err := graph.SetDir(true); err != nil { // Directed graph
-		return "", err
+		return "", [32]byte{}, err
 	}
 
 	// Calculate the total height of the tree
@@ -206,16 +206,16 @@ func buildMerkleTreeDot(totalTx uint32, vbits []bool, hashes [][32]byte) (string
 	}
 
 	merkleBranch := MerkleBranch{}
-	err := merkleBranch.CreateMerkleBranch(vbits, hashes, height)
+	root, err := merkleBranch.CreateMerkleBranch(vbits, hashes, height)
 	if err != nil {
-		return "", fmt.Errorf("failed to create Merkle branch: %w", err)
+		return "", [32]byte{}, fmt.Errorf("failed to create Merkle branch: %w", err)
 	}
 	g, err := merkleBranch.BuildGraph()
 	if err != nil {
-		return "", fmt.Errorf("failed to build Merkle branch graph: %w", err)
+		return "", [32]byte{}, fmt.Errorf("failed to build Merkle branch graph: %w", err)
 	}
 
-	return g, nil
+	return g, root, nil
 }
 
 func main() {
@@ -248,10 +248,13 @@ func main() {
 	}
 
 	// 13. Build Merkle Tree and generate Graphviz DOT output
-	dotString, err := buildMerkleTreeDot(proofData.TotalTransactions, proofData.VBits, proofData.Hashes)
+	dotString, root, err := buildMerkleTreeDot(proofData.TotalTransactions, proofData.VBits, proofData.Hashes)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error building Merkle tree: %v\n", err)
 		os.Exit(1)
+	}
+	if blockHeader.MerkleRoot != root {
+		fmt.Fprintf(os.Stderr, "Merkle Root mismatch!!\n")
 	}
 	fmt.Println(dotString)
 }

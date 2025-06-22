@@ -23,19 +23,23 @@ type MerkleBranch struct {
 	binTree []*MerkleNode
 }
 
-func (m *MerkleBranch) CreateMerkleBranch(vbits []bool, hashes [][32]byte, height int) error {
+func (m *MerkleBranch) CreateMerkleBranch(vbits []bool, hashes [][32]byte, height int) ([32]byte, error) {
 	m.binTree = []*MerkleNode{
 		NewBinTree(nil), // Root node
 	}
 
+	var root [32]byte
 	current := m.binTree[0]
 	vbitsIndex := 0
 	hashesIndex := 0
 	depth := 0
 	for {
 		if hashesIndex == len(hashes) {
-			hash := doubleSha256(append(current.Left.Hash, current.Right.Hash...))
-			current.Hash = hash[:]
+			if current.Left == nil || current.Left.Hash == nil || current.Right == nil || current.Right.Hash == nil {
+				return [32]byte{}, fmt.Errorf("all hashes is parsed, but tree construction is not finished")
+			}
+			root = doubleSha256(append(current.Left.Hash, current.Right.Hash...))
+			current.Hash = root[:]
 			fmt.Printf("//Calculated Merkle Root: %x\n", reverseBytes(current.Hash))
 			break
 		}
@@ -81,11 +85,11 @@ func (m *MerkleBranch) CreateMerkleBranch(vbits []bool, hashes [][32]byte, heigh
 		}
 		vbitsIndex++
 		if vbitsIndex >= len(vbits) {
-			return fmt.Errorf("vbits is too short, expected at least %d bits, got %d", len(m.binTree), vbitsIndex)
+			return [32]byte{}, fmt.Errorf("vBits is too short, expected at least %d bits, got %d", len(m.binTree), vbitsIndex)
 		}
 	}
 
-	return nil
+	return root, nil
 }
 
 func (m *MerkleBranch) BuildGraph() (string, error) {
