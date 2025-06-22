@@ -12,7 +12,6 @@ type MerkleNode struct {
 	Parent *MerkleNode
 	Left   *MerkleNode
 	Right  *MerkleNode
-	Target bool
 }
 
 func NewBinTree(parent *MerkleNode) *MerkleNode {
@@ -21,6 +20,7 @@ func NewBinTree(parent *MerkleNode) *MerkleNode {
 
 type MerkleBranch struct {
 	binTree []*MerkleNode
+	target  *MerkleNode
 }
 
 func (m *MerkleBranch) CreateMerkleBranch(vbits []bool, hashes [][32]byte, height int) ([32]byte, error) {
@@ -70,7 +70,9 @@ func (m *MerkleBranch) CreateMerkleBranch(vbits []bool, hashes [][32]byte, heigh
 			// set leaf information
 			current.Hash = hashes[hashesIndex][:]
 			hashesIndex++
-			current.Target = vbits[vbitsIndex] && depth == height
+			if vbits[vbitsIndex] && depth == height {
+				m.target = current
+			}
 
 			current = current.Parent
 			depth--
@@ -117,7 +119,7 @@ func (m *MerkleBranch) BuildGraph() (string, error) {
 		}
 		var fillColor string
 		if node.Left == nil && node.Right == nil {
-			if node.Target {
+			if node == m.target {
 				fillColor = "lightcoral"
 			} else {
 				fillColor = "lightblue"
